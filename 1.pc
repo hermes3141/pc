@@ -1,0 +1,559 @@
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <fcntl.h>
+#include  <stdarg.h>
+#include "swcomm_tcpapi.h"
+#include <errno.h>
+
+void UDOT(char *buf);
+char* GetTokenByIndex(char *inbuff, char separator, int index, char *outbuff, int outlen);
+char* GetToken(char *pBuff, char *pVal, int iValLen);
+char* strchrGBK(char *pSrc, char c);
+void TrimR(char *str);
+void Trim(char *str);
+void TrimL(char *str);
+void trimDot(char *inputStr);
+void WriteLog(char *format, ...);
+char *delLeftZero(char *buf);
+
+EXEC SQL INCLUDE SQLCA;
+#define	SETERROR(x)	errno=x	
+#define LOG_DIR "/home/maps/bjfh/bin/bzftf/"
+
+
+FILE *pLogFile = NULL;/*日志文件*/
+
+/*取出字符串中的第n个域*/ 
+int getSpecStr(unsigned char * src,char split,int n,char *dst) 
+{ 
+	int i=0,j=-1,k=0; 
+	char temp; 
+	for(i=0;i<strlen(src);i++) 
+	{ 
+		/* 汉字GBK编码规则: // 1.高位值在81到FE之间 // 2.低位值在40到FE之间,且<>7F*/ 
+		if(((unsigned char)(src[i]) >= (unsigned char)(0x81) && (unsigned char)(src[i]) <= (unsigned char)(0xFE)) && ((unsigned char)(src[i+1]) >= (unsigned char)(0x40) && (unsigned char)(src[i+1]) <= (unsigned char)(0xFE) && (unsigned char)(src[i+1]) != (unsigned char)(0x7F))) 
+		{ 
+			i++; 
+			continue; 
+		} 
+		temp=src[i]; 
+		if(temp==split) 
+		{ 
+			k++; 
+			if(k==n) 
+			{ 
+				break; 
+			} 
+			j=i; 
+		} 
+	} 
+	if(i==strlen(src)) 
+	{ 
+		k++; 
+	} 
+	if(k==n) 
+	{ 
+		strncpy(dst,&src[j+1],i-j-1); 
+		return 0; 
+	} return -1; 
+}
+
+int main(int argc, char *argv[])
+{
+EXEC SQL BEGIN DECLARE SECTION;
+    char userid               [41] = "";/*数据库登录名*/
+    char hisrefundjnl[31]="";/*历史流水号*/
+		char accno[20]="";/*账号*/
+		char bankjnl[23+1]="";/*银行流水号*/
+		char amount[20]="";/*退费金额*/
+		char terminalID[20]="";/*终端号*/
+		char smid[20]="";/*商户号*/
+		char spredate[20]="";/*原交易日期*/
+		char ssubno[200]="";/*项目名称*/
+    char sqzjip[20]="";/*第三方ip*/
+    char sqzjuser[20]="";/*前置机服务器用户*/
+    char sqzjpass[20]="";/*前置机服务器密码*/
+    char sqzjport[20]="";/*前置机服务器端口号*/
+    char sqzjpath[100]="";/*前置机文件路径*/
+    char sqzjfile[20]="";/*前置机退费文件名称前缀*/
+    char scosppath[100]="";/*cosp存放退费文件路径*/     
+    char filedate[15] = "";/*T日日期*/
+    char tran_date[15]="";/*交易日期*/
+    char note1[100]="";  /*退费检索参考号*/
+    char his_jnl[31] = "";/*历史流水号*/
+    char sobflag[3] = "";  /*入账方式，0-联机逐步 1-联机汇总*/ 
+    char ymd[20]="",date[20]="",sMsg[200]="";
+    int snum=0;
+EXEC SQL END DECLARE SECTION;
+		
+		int i_succ = 0;   
+		int fd=-1;
+		int ret = 0;
+		int rc=-1;
+		time_t timer;
+		struct tm   *t;
+    FILE* fpbank    = NULL;
+    FILE* fphos    = NULL;
+    FILE *cFile = NULL;   /*配置文件*/
+    char sIP[16];               /* gtcgIP地址 */ 
+	  char sPort[6];              /* 交易端口号 */
+    char filename[200] = "";
+     char sfile[50] = "";
+    char filenamedir[200] = "";
+    
+    char logname [200] = "";
+    char errstr  [300] = "";
+    char ora_file[300] = "";   /* 数据库参数文件路径*/
+    char ora_pass[100] = "";   /* 用户连接参数*/
+    char line   [1500] = "";
+    char TempBuf[300];
+    char *pVal = NULL;
+    char sLine  [4000] = "";
+    char command[200]="";
+    char scommand[200]="";
+    char sCommands[200]="";
+    char sBuffer[300]="";
+    char configfile[500] ="";
+    char	sret[30];
+    char tmpdir[100]="";
+    char mon1[20]="",buf[1024];
+    
+	  memset(sLine,         0x00, sizeof(sLine));
+	  memset(sfile,         0x00, sizeof(sfile));
+	  memset(sIP,          0x00, sizeof(sIP));
+	  memset(sPort,       0x00,   sizeof(sPort));
+	  memset(sret,       0x00,   sizeof(sret));
+	  memset(filedate,       0x00,   sizeof(filedate));
+	  memset(filename,       0x00,   sizeof(filename));
+	  memset(tmpdir,0x00,sizeof(tmpdir));
+	  memset(date,0x00,sizeof(date));
+	  
+	  time(&timer);
+		t = localtime(&timer);
+		memset(date,0,sizeof(date));
+		sprintf(date,"%4d%02d%02d  %02d:%02d",t->tm_year+1900,t->tm_mon+1,t->tm_mday,t->tm_hour,t->tm_min);/*获得当前系统日期*/
+		memset(ymd,0,sizeof(ymd));
+		memset(mon1,0,sizeof(mon1));
+		memcpy(ymd,date,8);
+		memcpy(mon1,date,6);
+	  sprintf(logname,"%sbzftf_%s.log",LOG_DIR,ymd);
+    if ((pLogFile = fopen(logname, "a")) == NULL)
+    {
+        printf("错误: 打开日志文件失败\n");
+        WriteLog("错误: 打开日志文件失败");
+        exit( -1 );
+    }
+    
+	      
+    strcpy(ora_file, "/home/maps/conf/mapsbj.pass");
+
+    if (!NatpGetstr(ora_file, "ORAINFO", "bjcosp", ora_pass, sizeof(ora_pass)))
+    {
+        WriteLog("错误: 获取ag用户密码错，请检查配置文件[%s]设置", ora_file);
+        fclose(pLogFile);
+        exit( -1 );
+    }
+
+    strcpy(userid, "bjcosp/");
+    strcat(userid, ora_pass);
+
+    EXEC SQL CONNECT :userid;
+
+    if (sqlca.sqlcode != 0)
+    {
+        memset(errstr, 0, sizeof(errstr));
+        memcpy(errstr, sqlca.sqlerrm.sqlerrmc, sqlca.sqlerrm.sqlerrml);
+        WriteLog("连接数据库失败: %s", errstr);
+        fclose(pLogFile);
+        exit( -1 );
+    }
+    if (argc ==2&&strlen(argv[1])!=8)
+    {
+
+        printf("错误：参数错误,请输入8位要处理的文件日期\n");
+        WriteLog("错误：参数错误,请输入8位要处理的文件的日期");
+        fclose(pLogFile);
+        exit( -1 );
+    }
+    else if (argc ==2&&strlen(argv[1])==8)
+    {
+    	sprintf(filedate,"%s",argv[1]);
+    	WriteLog("要处理的文件日期=[%s]",filedate);
+    }
+	  else
+	  {/*备份流水放这里防止补做时清空未处理的流水表数据*/	  	
+     EXEC SQL SELECT to_char(sysdate, 'yyyymmdd'),to_char(sysdate, 'yyyymm') INTO :filedate,:filemon FROM dual;
+    	if (sqlca.sqlcode != 0)
+    	{
+        memset(errstr, 0, sizeof(errstr));
+        memcpy(errstr, sqlca.sqlerrm.sqlerrmc, sqlca.sqlerrm.sqlerrml);
+        WriteLog("查询系统日期失败");
+        fclose(pLogFile);
+        exit( -1 );
+    	}
+    	//备份流水
+    	EXEC SQL INSERT INTO BJCOSP.BZF_REFUND_DATA_HIS SELECT * FROM BJCOSP.BZF_REFUND_DATA;
+			if( sqlca.sqlcode != 0 )
+			{
+				EXEC SQL ROLLBACK RELEASE;
+				WriteLog("备份流水失败: %s", sqlca.sqlerrm.sqlerrmc);
+				fclose(pLogFile);
+				exit( -1 );
+			}	
+			EXEC SQL DELETE FROM BJCOSP.BZF_REFUND_DATA ;
+			if( sqlca.sqlcode && sqlca.sqlcode!=100 && sqlca.sqlcode!=1403 )
+			{
+				EXEC SQL ROLLBACK RELEASE;
+				WriteLog("清空流水表数据失败: %s", sqlca.sqlerrm.sqlerrmc);
+				fclose(pLogFile);
+    	    exit( -1 );
+			}
+			EXEC SQL commit work ;
+			WriteLog("备份流水成功");
+	  }
+    Trim(filedate);
+		memset(sqzjip,     0x00, sizeof(sqzjip));
+		memset(sqzjuser,   0x00, sizeof(sqzjuser));
+		memset(sqzjpass,   0x00, sizeof(sqzjpass));
+		memset(sqzjport,   0x00, sizeof(sqzjport));
+		memset(sqzjpath,   0x00, sizeof(sqzjpath));	
+		memset(qzjfile,   0x00, sizeof(qzjfile));
+		memset(TempBuf, 0x00, sizeof(TempBuf));
+		memset(command,0x00,sizeof(command));
+		memset(sBuffer, 0x00, sizeof(sBuffer));
+		memset(scosppath,0x00, sizeof(scosppath));
+		memset(filenamedir,0x00, sizeof(filenamedir));
+		memset(scospshname,0x00, sizeof(scospshname));	
+		memset(sobflag,0x00, sizeof(sobflag));	
+		memset(buf,0x00, sizeof(buf));		
+		memset(scommand,0x00,sizeof(scommand));	
+		//获取ip等信息
+		EXEC SQL	SELECT PARAMETER1,PARAMETER2,PARAMETER3,PARAMETER4,PARAMETER5,PARAMETER6,PARAMETER7,PARAMETER8,PARAMETER9
+		INTO :sqzjip,:sqzjuser,:sqzjpass,:sqzjpath,:qzjfile,:scosppath,:scospshname,sobflag,sqzjport
+		FROM BJCOSP.BZFREF_INFO WHERE NAME='DOWNLOAD';
+	  if (sqlca.sqlcode != 0)
+    {
+        memset(errstr, 0, sizeof(errstr));
+        memcpy(errstr, sqlca.sqlerrm.sqlerrmc, sqlca.sqlerrm.sqlerrml);
+        WriteLog("查询系统日期失败");
+        fclose(pLogFile);
+        exit( -1 );
+    }
+		
+		Trim(sqzjip);
+		Trim(sqzjuser);
+		Trim(sqzjpass);
+		Trim(sqzjpath);
+		Trim(qzjfile);
+		Trim(scosppath);
+		Trim(scospshname);
+		Trim(sobflag);
+		Trim(sqzjport);
+		sprintf(sqzjpath,"%s%s",sqzjpath,filemon);
+		sprintf(filename,"%s%s.txt",qzjfile,filedate);
+		sprintf(filenamedir,"%s%s",scosppath,filename);
+    WriteLog("<----%s %s %s %s %s %s %s", scospshname,sqzjip,sqzjuser,sqzjpass,sqzjpath,scosppath,filename);
+  	sprintf(command,"sh %s %s %s %s %s %s %s", scospshname,sqzjip,sqzjuser,sqzjpass,sqzjpath,scosppath,filename);
+		WriteLog("获取文件到cosp的command=[%s]",command );
+		rc = system(command);
+		if(rc != 0)
+		{
+			WriteLog("取数据文件[%s]到cosp错",hosfilename);
+		    fclose(pLogFile);
+		    EXEC SQL CLOSE HOS_CUR;
+		    return -1;
+		}
+		sprintf(tmpdir,"%s%s",scosppath,mon1);
+		if(access(tmpdir,R_OK)<0)
+		{
+			if(mkdir(tmpdir,S_IRUSR|S_IWUSR|S_IXUSR|S_IRWXG|S_IRWXO)<0)
+			{
+				WriteLog("目录不存在,建立目录 %s 失败  !",tmpdir);
+		    fclose(pLogFile);
+		    EXEC SQL CLOSE HOS_CUR;
+		    return -1;
+			}
+		}
+		sprintf(scommand,"cp %s %s%s/%s",filenamedir,scosppath,mon1,filename);   
+		WriteLog("备份文件的scommand = [%s]",scommand); 
+		rc = system(scommand);
+		if(rc != 0)
+		{
+			WriteLog("备份文件错");
+		}
+		if((fphos = fopen(filenamedir,"r"))==NULL) 
+		{
+			WriteLog("打开文件 %s 失败  !",filenamedir);
+			fclose(pLogFile);
+			EXEC SQL CLOSE HOS_CUR;
+		  return -1;
+		}
+	 memset(buf,0,sizeof(buf));
+	 i_succ=0;
+	 while( fgets(buf, sizeof(buf), fphos) != NULL ) 
+	{
+		memset(hisrefundjnl,0,sizeof(hisrefundjnl));
+		memset(accno,0,sizeof(accno));
+		memset(bankjnl,0,sizeof(bankjnl));
+		memset(amount,0,sizeof(amount));
+		memset(terminalID,0,sizeof(terminalID));		
+		memset(smid,0,sizeof(smid));
+		memset(spredate,0,sizeof(spredate));
+		memset(ssubno,0,sizeof(ssubno));
+				
+		Trim(buf);
+		
+		if ( buf[strlen(buf)-1]=='\n')
+			{
+				if ( buf[strlen(buf)-2]=='\r')
+				{
+					buf[strlen(buf)-2]='\0';
+					Trim(buf);
+				}
+				else
+				{
+					buf[strlen(buf)-1]='\0';
+					Trim(buf);
+				}
+			}
+
+				getSpecStr(buf, '|', 1, hisrefundjnl);
+				getSpecStr(buf, '|', 2, accno);
+				getSpecStr(buf, '|', 3, bankjnl);
+				getSpecStr(buf, '|', 4, amount);
+				
+				getSpecStr(buf, '|', 5, terminalID);
+				getSpecStr(buf, '|', 6, smid);
+				getSpecStr(buf, '|', 7, spredate);
+				getSpecStr(buf, '|', 8, ssubno);
+								
+				trimDot(amount);
+
+				strcpy(amount , delLeftZero(amount));
+
+				Trim(hisrefundjnl);
+        Trim(accno);
+        Trim(bankjnl);
+        Trim(amount);
+        
+        Trim(terminalID);
+        Trim(smid);
+        Trim(spredate);
+        Trim(ssubno);
+
+		
+	 	WriteLog("退费流水号=[%s]银行卡号[%s]银行流水号[%s]金额[%s]posid[%s]商户号[%s]原交易日期[%s]项目名称[%s]",hisrefundjnl,accno,bankjnl,amount,terminalID,smid,spredate,ssubno); 
+
+		EXEC SQL INSERT INTO BJCOSP.BZF_REFUND_DATA(HIS_JNL,CARD_NO,POS_SEQNO,AMOUNT,TIDNO,MIDNO,PRE_DATE,SUBNO,OBFLAG)
+		VALUES(:hisrefundjnl,:accno,:bankjnl,:amount,:terminalID,:smid,:spredate,:ssubno,:sobflag);
+		if(sqlca.sqlcode!=0)
+		{
+			WriteLog("<---插入数据表失败-SQLCODE=[%d],SQLMSG=[%s]",sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
+			fclose(fphos);			
+			fclose(pLogFile);
+			EXEC SQL CLOSE HOS_CUR;
+			EXEC SQL ROLLBACK RELEASE;
+		  return -1;
+		}
+		i_succ++;
+	}//解析退费文件while
+	EXEC SQL COMMIT RELEASE;
+	EXEC SQL CLOSE HOS_CUR;
+  fclose(fphos);		
+	fclose(pLogFile);
+	printf("文件导入完毕，共[%ld]笔\n", i_succ);
+  WriteLog("<----------文件导入完毕，共[%ld]笔", i_succ);
+  return 0;
+}
+
+void WriteLog(char *format, ...)
+{
+    time_t t;
+    va_list p_arg;
+    struct tm *p_tm;
+    char s_time[50];
+
+    time(&t);
+    p_tm = localtime(&t);
+
+    if (!strftime(s_time, sizeof(s_time), "%m.%d %H:%M:%S", p_tm))
+    {
+        s_time[0] = 0;
+    }
+
+    va_start(p_arg, format);
+    /* vprintf(format, p_arg); */
+    va_end(p_arg);
+    /* printf("\n"); */
+
+    if (pLogFile != NULL)
+    {
+        fprintf(pLogFile, "%s> ", s_time);
+
+        va_start(p_arg, format);
+        vfprintf(pLogFile, format, p_arg);
+        va_end(p_arg);
+
+        fprintf(pLogFile, "\n");
+        fflush(pLogFile);
+    }
+}
+
+void TrimL(char *str)
+{
+    int len = 0, i = 0, count = 0;
+
+    len = strlen(str);
+
+    for (i = 0; i < len; i++)
+    {
+        if (str[i] == ' ')
+            count++;
+        else
+            break;
+    }
+
+    if (count != 0)
+    {
+        for (i = 0; i < len - count; i++)
+            str[i] = str[count + i];
+
+        for (i = len - count; i < len; i++)
+            str[i] = '\0';
+    }
+}
+
+void TrimR(char *str)
+{
+    int i = 0;
+
+    for (i = strlen(str) - 1; i >= 0; i--)
+    {
+        if (str[i] == ' ')
+            str[i] = '\0';
+        else
+            break;
+    }
+}
+
+void Trim(char *str)
+{
+    TrimR(str);
+    TrimL(str);
+}
+
+char* strchrGBK(char *pSrc, char c)
+{
+    int i = 0;
+
+    while (*(pSrc + i) != 0)
+    {
+        if (*(pSrc + i) == c)
+        {
+            return pSrc + i;
+        }
+
+        if (*(pSrc + i) >= 0x81)
+        {
+            i++;
+
+            if (*(pSrc + i) == 0)
+            {
+                break;
+            }
+        }
+
+        i++;
+    }
+
+    return NULL;
+}
+
+char* GetToken(char *pBuff, char *pVal, int iValLen)
+{
+    char *pDiv = NULL;
+
+    if ((pDiv = strchrGBK(pBuff, '|')) == NULL)
+    {
+        return NULL;
+    }
+
+    *pDiv = '\0';
+
+    if (pVal != NULL)
+    {
+        if (strlen(pBuff) > iValLen - 1)
+        {
+            return NULL;
+        }
+
+        strcpy(pVal, pBuff);
+    }
+
+    return pDiv + 1;
+}
+
+char* GetTokenByIndex(char *inbuff, char separator, int index, char *outbuff, int outlen)
+{
+    int i = 0;
+    int len = 0;
+    char *pbegin = inbuff;
+    char *pend = NULL;
+
+    if (inbuff == NULL || outbuff == NULL)
+    {
+        return NULL;
+    }
+
+    for (i = 1; i < index; i++)
+    {
+        if ((pbegin = strchrGBK(pbegin, separator)) == NULL)
+        {
+            return NULL;
+        }
+
+        pbegin++;
+    }
+
+    if ((pend = strchrGBK(pbegin, separator)) == NULL)
+    {
+        pend = pbegin + strlen(pbegin);
+    }
+
+    len = pend - pbegin;
+
+    if (len + 1 > outlen)
+    {
+        return NULL;
+    }
+
+    if (len > 0)
+    {
+        memcpy(outbuff, pbegin, len);
+    }
+
+    outbuff[len] = '\0';
+    return pbegin;
+}
+
+void trimDot(char *inputStr)
+{
+  int i;
+  char *p, *q;
+  p=inputStr;
+  
+  for(i=0; i<strlen(inputStr); i++)
+  {
+    q=p+1;
+    if(*p == '.'){
+      *p = *q;
+      *q = '.';
+    }
+    p++;
+  }  
+  return;
+}
